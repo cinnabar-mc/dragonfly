@@ -51,7 +51,8 @@ func CanAttemptActivation(held item.Stack, sneaking bool) bool {
 
 // Pickable represents a block that may give a different item then the block itself when picked.
 type Pickable interface {
-	// Pick returns the item that is picked when the block is picked.
+	// Pick returns the item that is picked when the block is picked. An empty stack means the block has no item,
+	// so picking it does nothing.
 	Pick() item.Stack
 }
 

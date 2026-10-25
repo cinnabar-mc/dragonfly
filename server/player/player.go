@@ -2283,9 +2283,12 @@ func (p *Player) PickBlock(pos cube.Pos) {
 	if pi, ok := b.(block.Pickable); ok {
 		pickedItem = pi.Pick()
 	} else if i, ok := b.(world.Item); ok {
-		it, _ := world.ItemByName(i.EncodeItem())
-		pickedItem = item.NewStack(it, 1)
-	} else {
+		// A block registered without an item, such as a custom block that offers none, picks nothing.
+		if it, registered := world.ItemByName(i.EncodeItem()); registered {
+			pickedItem = item.NewStack(it, 1)
+		}
+	}
+	if pickedItem.Empty() {
 		return
 	}
 
