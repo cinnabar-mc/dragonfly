@@ -1833,6 +1833,26 @@ func (p *Player) UseItemOnBlock(pos cube.Pos, face cube.Face, clickPos mgl64.Vec
 			}
 		}
 	}
+	p.useHeldItemOnBlock(pos, face, clickPos, b, i, left)
+}
+
+// UseItemOnBlockWithoutActivation uses the item held in the main hand of the player on the block at the position
+// passed as UseItemOnBlock does when the block does not take the click: the block is not activated, and the item
+// use handler, which ran for the click, does not run again. It is for an Activatable block that took a click
+// while it decided what to do with it and then passed it on. Like UseItemOnBlock, it does nothing if the block at
+// the position is air or out of reach.
+func (p *Player) UseItemOnBlockWithoutActivation(pos cube.Pos, face cube.Face, clickPos mgl64.Vec3) {
+	if _, ok := p.tx.Block(pos).(block.Air); ok || !p.canReach(pos.Vec3Centre()) {
+		p.resendNearbyBlocks(pos, face)
+		return
+	}
+	i, left := p.HeldItems()
+	p.useHeldItemOnBlock(pos, face, clickPos, p.tx.Block(pos), i, left)
+}
+
+// useHeldItemOnBlock uses the held items i and left on the block b at pos, which did not take the click: an item
+// usable on blocks is used, and a block item is placed against b.
+func (p *Player) useHeldItemOnBlock(pos cube.Pos, face cube.Face, clickPos mgl64.Vec3, b world.Block, i, left item.Stack) {
 	if i.Empty() {
 		return
 	}
