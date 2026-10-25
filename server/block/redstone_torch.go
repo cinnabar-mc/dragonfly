@@ -185,7 +185,7 @@ func (t RedstoneTorch) attachmentPowered(pos cube.Pos, tx *world.Tx) bool {
 	}
 	attached := pos.Side(t.facing())
 	attachedBlock := tx.Block(attached)
-	if source, ok := attachedBlock.(world.RedstonePowerSource); ok {
+	if source, ok := attachedBlock.(world.RedstonePowerSource); ok && world.RedstoneComponent(attachedBlock) {
 		for _, face := range cube.Faces() {
 			if world.ClampRedstonePower(source.RedstonePower(attached, tx, face)) > 0 {
 				return true

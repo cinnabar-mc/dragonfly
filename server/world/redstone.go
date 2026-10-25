@@ -109,6 +109,20 @@ type RedstoneNonConductive interface {
 	RedstoneNonConductive()
 }
 
+// RedstoneOptional may be implemented by blocks whose type implements redstone interfaces that only some of its
+// values use, such as blocks registered at runtime. A block whose RedstoneComponent returns false takes no part in
+// redstone: the engine and redstone wire treat it as a block implementing none of the redstone interfaces.
+type RedstoneOptional interface {
+	RedstoneComponent() bool
+}
+
+// RedstoneComponent reports whether b takes part in redstone through the redstone interfaces it implements: always,
+// unless it implements RedstoneOptional and opts out.
+func RedstoneComponent(b Block) bool {
+	optional, ok := b.(RedstoneOptional)
+	return !ok || optional.RedstoneComponent()
+}
+
 // redstoneEngine evaluates the immediate-power network for a world and caches transient power state. Neighbour updates
 // and scheduled block ticks remain the semantic model for block behaviour; the engine just resolves wire/relayer power
 // and lets consumers and actions schedule any delayed or directional changes themselves.
@@ -470,11 +484,13 @@ func (e *redstoneEngine) update(tx *Tx, pos cube.Pos, d redstoneDirty, newPower 
 	oldPower, newPower := e.power[pos], ClampRedstonePower(newPower)
 
 	after, blockChanged := b, false
-	if consumer, ok := b.(RedstonePowerConsumer); ok {
+	component := RedstoneComponent(b)
+	if consumer, ok := b.(RedstonePowerConsumer); ok && component {
 		after, blockChanged = consumer.RedstonePowerUpdate(pos, tx, newPower)
 	}
 	action, hasAction := b.(RedstonePowerAction)
 	contextAction, hasContextAction := b.(RedstonePowerContextAction)
+	hasAction, hasContextAction = hasAction && component, hasContextAction && component
 
 	update := d.redstoneUpdate(pos, b, oldPower, newPower, e.currentTick)
 	if blockChanged {
@@ -584,7 +600,7 @@ func (e *redstoneEngine) directPowerFrom(pos cube.Pos, tx *Tx, face cube.Face) i
 	if !ok {
 		return 0
 	}
-	if source, ok := b.(RedstonePowerSource); ok {
+	if source, ok := b.(RedstonePowerSource); ok && RedstoneComponent(b) {
 		return ClampRedstonePower(e.redstonePower(source, neighbour, tx, face.Opposite()))
 	}
 	return 0
@@ -663,7 +679,7 @@ func (e *redstoneEngine) weakBlockPowerFrom(pos cube.Pos, tx *Tx, face cube.Face
 	if !ok {
 		return 0
 	}
-	if source, ok := b.(RedstonePowerSource); ok && e.redstoneWeaklyPowersBlocks(b) {
+	if source, ok := b.(RedstonePowerSource); ok && RedstoneComponent(b) && e.redstoneWeaklyPowersBlocks(b) {
 		return ClampRedstonePower(e.redstonePower(source, sourcePos, tx, face.Opposite()))
 	}
 	return 0
@@ -746,7 +762,7 @@ func (e *redstoneEngine) sourcePower(pos cube.Pos, tx *Tx) int {
 		return 0
 	}
 	source, ok := b.(RedstonePowerSource)
-	if !ok {
+	if !ok || !RedstoneComponent(b) {
 		return 0
 	}
 	power := 0
@@ -769,7 +785,7 @@ func (e *redstoneEngine) graphPower(tx *Tx, graph redstoneGraph) []int {
 	edges := make([][]redstoneEdge, len(graph.nodes))
 	for i, node := range graph.nodes {
 		index[node.pos] = i
-		if b, ok := tx.World().blockLoaded(node.pos); ok {
+		if b, ok := tx.World().blockLoaded(node.pos); ok && RedstoneComponent(b) {
 			sources[i], _ = b.(RedstonePowerSource)
 			relayers[i], _ = b.(RedstonePowerRelayer)
 		}
@@ -874,7 +890,7 @@ func (e *redstoneEngine) powerFrom(pos cube.Pos, tx *Tx, face cube.Face) int {
 		relayer, isRelayer := b.(RedstonePowerRelayer)
 		// See graphPower: relayers carry recomputed power through edges, so their
 		// stored RedstonePower should not count as an independent source here.
-		if source, ok := b.(RedstonePowerSource); ok && !isRelayer && e.acceptsDirectSourcePower(pos, tx) {
+		if source, ok := b.(RedstonePowerSource); ok && !isRelayer && RedstoneComponent(b) && e.acceptsDirectSourcePower(pos, tx) {
 			power = max(power, ClampRedstonePower(e.redstonePower(source, s.pos, tx, s.from)-s.loss))
 		}
 		if !isRelayer {
@@ -1164,6 +1180,9 @@ func redstoneStepFace(from, to cube.Pos) cube.Face {
 
 // classifyRedstoneBlock reports the redstone capabilities implemented by b.
 func classifyRedstoneBlock(b Block) (source, consumer, action, relayer bool) {
+	if !RedstoneComponent(b) {
+		return
+	}
 	_, source = b.(RedstonePowerSource)
 	_, consumer = b.(RedstonePowerConsumer)
 	_, action = b.(RedstonePowerAction)
