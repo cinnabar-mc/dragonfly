@@ -75,6 +75,56 @@ func TestNewNetworkBlockRegistry_BuiltInRuntimeIDsWithoutOptionalBlocks(t *testi
 	}
 }
 
+// TestNewNetworkBlockRegistry_AdvertisedOrder checks that local definitions cannot change the network palette.
+func TestNewNetworkBlockRegistry_AdvertisedOrder(t *testing.T) {
+	for _, values := range [][]any{{"z", "y", "x"}, {"z", "x"}} {
+		t.Run(values[0].(string)+values[1].(string), func(t *testing.T) {
+			entries := []protocol.BlockEntry{{Name: "test:ordered", Properties: map[string]any{
+				"properties": []any{
+					map[string]any{"name": "test:a", "enum": []any{false, true}},
+					map[string]any{"name": "test:b", "enum": values},
+				},
+				"traits": []any{
+					map[string]any{"name": "minecraft:placement_position", "enabled_states": map[string]any{"vertical_half": uint8(1)}},
+					map[string]any{"name": "minecraft:placement_direction", "enabled_states": map[string]any{"cardinal_direction": uint8(1)}},
+				},
+			}}}
+			expected, err := NewNetworkBlockRegistry(entries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := DefaultBlockRegistry
+			seed := NewBlockRegistry().(*BasicBlockRegistry)
+			for i := range 48 {
+				seed.RegisterBlock(orderedState(i))
+			}
+			seed.Finalize()
+			DefaultBlockRegistry = seed
+			defer func() { DefaultBlockRegistry = original }()
+			actual, err := NewNetworkBlockRegistry(entries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actual.BlockCount() != expected.BlockCount() {
+				t.Fatalf("local implementation changes palette size: got %d, want %d", actual.BlockCount(), expected.BlockCount())
+			}
+			for rid, block := range expected.Blocks() {
+				name, properties := block.EncodeBlock()
+				got, ok := actual.StateToRuntimeID(name, properties)
+				if !ok || got != uint32(rid) {
+					t.Fatalf("state %s %v: got (%d, %t), want %d", name, properties, got, ok, rid)
+				}
+				if name == "test:ordered" {
+					inherited, _ := actual.BlockByRuntimeID(got)
+					if _, ok := inherited.(orderedBlock); !ok {
+						t.Fatalf("local implementation missing for %v", properties)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestNewNetworkBlockRegistry_InheritedCustomBlocks(t *testing.T) {
 	baseline, err := NewNetworkBlockRegistry(nil)
 	if err != nil {

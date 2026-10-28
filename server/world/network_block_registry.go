@@ -13,7 +13,9 @@ import (
 // retained; other custom states come from the advertised definitions.
 // The returned registry is independent of DefaultBlockRegistry.
 func NewNetworkBlockRegistry(entries []protocol.BlockEntry) (BlockRegistry, error) {
+	DefaultBlockRegistry.Finalize()
 	registry := NewBlockRegistry().(*BasicBlockRegistry)
+	implementations := make(map[string]CustomBlock)
 	omitted := make(map[string]struct{}, len(DataDrivenBlocks()))
 	for _, block := range DataDrivenBlocks() {
 		omitted[block.Name] = struct{}{}
@@ -25,13 +27,16 @@ func NewNetworkBlockRegistry(entries []protocol.BlockEntry) (BlockRegistry, erro
 		}
 	}
 	for _, entry := range entries {
-		if _, registered := registry.customBlocks[entry.Name]; registered || strings.HasPrefix(entry.Name, "minecraft:") {
+		if strings.HasPrefix(entry.Name, "minecraft:") {
 			delete(omitted, entry.Name)
 		}
+		if block, ok := registry.customBlocks[entry.Name]; ok {
+			implementations[entry.Name] = block
+		}
 	}
+	clear(registry.customBlocks)
 	for name := range omitted {
 		delete(registry.blockProperties, name)
-		delete(registry.customBlocks, name)
 	}
 	registry.blocks = slices.DeleteFunc(registry.blocks, func(block Block) bool {
 		name, _ := block.EncodeBlock()
@@ -47,6 +52,20 @@ func NewNetworkBlockRegistry(entries []protocol.BlockEntry) (BlockRegistry, erro
 	if err := AddCustomBlocks(registry, entries); err != nil {
 		return nil, err
 	}
-	registry.Finalize()
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	// Sort the advertised state space before attaching local implementation metadata.
+	registry.sortForNetworkLocked()
+	for rid, block := range registry.blocks {
+		name, properties := block.EncodeBlock()
+		if _, custom := implementations[name]; !custom {
+			continue
+		}
+		if implementation, ok := DefaultBlockRegistry.BlockByName(name, properties); ok {
+			registry.blocks[rid] = implementation
+		}
+	}
+	registry.customBlocks = implementations
+	registry.finalizeLocked()
 	return registry, nil
 }
