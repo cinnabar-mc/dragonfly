@@ -26,8 +26,12 @@ func (w *World) deriveStates(centre ChunkPos) {
 	for x := int32(-1); x <= 1; x++ {
 		for z := int32(-1); z <= 1; z++ {
 			pos := ChunkPos{centre[0] + x, centre[1] + z}
-			if c, ok := w.chunks[pos]; ok && c.LegacyStates() {
-				w.deriveChunkStates(pos, c)
+			if c, ok := w.chunks[pos]; ok {
+				if c.LegacyStates() {
+					w.deriveChunkStates(pos, c)
+				} else {
+					w.applyDerivedStates(c, w.derivedBlocks(pos, c, &centre))
+				}
 			}
 		}
 	}
@@ -44,8 +48,13 @@ func (w *World) deriveChunkStates(pos ChunkPos, c *Column) {
 			}
 		}
 	}
-	found := w.derivedBlocks(pos, c)
+	found := w.derivedBlocks(pos, c, nil)
 	c.MarkStatesUpgraded()
+	w.applyDerivedStates(c, found)
+}
+
+// applyDerivedStates updates derived appearance without changing pending tick deadlines.
+func (w *World) applyDerivedStates(c *Column, found []derivedBlock) {
 	if len(found) == 0 {
 		return
 	}
@@ -59,6 +68,7 @@ func (w *World) deriveChunkStates(pos ChunkPos, c *Column) {
 		// Written straight into the chunk rather than through Tx.SetBlock, which would run the
 		// neighbour updates of a state that was only ever wrong in memory.
 		c.SetBlock(uint8(f.pos[0]), int16(f.pos[1]), uint8(f.pos[2]), 0, w.conf.Blocks.BlockRuntimeID(derived))
+		w.scheduledUpdates.replaceState(w.conf.Blocks, f.pos, f.b, derived)
 		c.modified = true
 
 		// A chunk whose neighbours arrived after it was sent is upgraded while viewers already hold
@@ -70,8 +80,10 @@ func (w *World) deriveChunkStates(pos ChunkPos, c *Column) {
 }
 
 // derivedBlocks returns every StateDeriver in the chunk at pos. Sub chunks are filtered on their
-// palette first, so that one holding none of them is skipped without reading any block in it.
-func (w *World) derivedBlocks(pos ChunkPos, c *Column) []derivedBlock {
+// palette first, so that one holding none of them is skipped without reading any block in it. When
+// facing is non-nil, only derivers on the chunk boundary shared with that chunk are returned, so a
+// neighbour load refreshes just the edge it can affect instead of the whole chunk.
+func (w *World) derivedBlocks(pos ChunkPos, c *Column, facing *ChunkPos) []derivedBlock {
 	var found []derivedBlock
 	baseX, baseZ := int(pos[0])<<4, int(pos[1])<<4
 	for index, sub := range c.Sub() {
@@ -101,8 +113,11 @@ func (w *World) derivedBlocks(pos ChunkPos, c *Column) []derivedBlock {
 
 		baseY := int(c.SubY(int16(index)))
 		for x := byte(0); x < 16; x++ {
-			for y := byte(0); y < 16; y++ {
-				for z := byte(0); z < 16; z++ {
+			for z := byte(0); z < 16; z++ {
+				if facing != nil && !touchesLoadedBoundary(x, z, pos, *facing) {
+					continue
+				}
+				for y := byte(0); y < 16; y++ {
 					if d, ok := derivers[storage.PaletteIndex(x, y, z)]; ok {
 						found = append(found, derivedBlock{
 							pos: cube.Pos{baseX + int(x), baseY + int(y), baseZ + int(z)},
@@ -114,4 +129,28 @@ func (w *World) derivedBlocks(pos ChunkPos, c *Column) []derivedBlock {
 		}
 	}
 	return found
+}
+
+// touchesLoadedBoundary reports whether the column (x, z) of chunk pos lies on the boundary shared
+// with the chunk at facing. When facing is pos itself, every edge column qualifies, since any of the
+// chunk's neighbours may have just become available.
+func touchesLoadedBoundary(x, z byte, pos, facing ChunkPos) bool {
+	dx, dz := facing[0]-pos[0], facing[1]-pos[1]
+	if dx == 0 && dz == 0 {
+		return x == 0 || x == 15 || z == 0 || z == 15
+	}
+	return axisTouches(dx, x) && axisTouches(dz, z)
+}
+
+// axisTouches reports whether coord sits on the edge of a chunk facing another chunk one step away
+// in direction d along that axis. d == 0 means the chunks share the whole axis, so any coord does.
+func axisTouches(d int32, coord byte) bool {
+	switch d {
+	case -1:
+		return coord == 0
+	case 1:
+		return coord == 15
+	default:
+		return true
+	}
 }
