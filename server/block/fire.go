@@ -245,11 +245,8 @@ func (f Fire) NeighbourUpdateTick(pos, changedNeighbour cube.Pos, tx *world.Tx) 
 	if updated.Type != f.Type {
 		tx.SetBlock(pos, updated, nil)
 	} else if updated.Connections != f.Connections {
-		// Only the look of the fire changes, which its neighbours do not
-		// depend on. Scheduled ticks match the full block state, so the tick
-		// pending for the old connections would never run and is replaced.
-		tx.SetBlock(pos, updated, &world.SetOpts{DisableBlockUpdates: true})
-		tx.ScheduleBlockUpdate(pos, updated, time.Duration(30+rand.IntN(10))*time.Second/20)
+		// Connections affect appearance, so retain the pending tick deadline.
+		tx.SetBlock(pos, updated, &world.SetOpts{DisableBlockUpdates: true, KeepScheduledTicks: true})
 	}
 }
 

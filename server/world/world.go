@@ -341,6 +341,9 @@ type SetOpts struct {
 	// holds for the position, for a change that does not affect the power the
 	// block receives or emits, such as the shape of redstone wire.
 	KeepRedstonePower bool
+	// KeepScheduledTicks preserves pending tick deadlines for an appearance-only
+	// state change. It must not be used when the block's behaviour changes.
+	KeepScheduledTicks bool
 }
 
 // setBlock writes a block to the position passed. If a chunk is not yet loaded
@@ -372,7 +375,7 @@ func (tx *Tx) setBlock(pos cube.Pos, b Block, opts *SetOpts) {
 
 	rid := w.conf.Blocks.BlockRuntimeID(b)
 	redstoneAfterRelevant := isRedstoneRelevant(b)
-	needOldBlock := !opts.DisableRedstoneUpdates || !redstoneAfterRelevant
+	needOldBlock := opts.KeepScheduledTicks || !opts.DisableRedstoneUpdates || !redstoneAfterRelevant
 	needOldRID := needOldBlock || (rid != w.conf.Blocks.AirRuntimeID() && !opts.DisableLiquidDisplacement)
 
 	var oldRID uint32
@@ -433,6 +436,14 @@ func (tx *Tx) setBlock(pos cube.Pos, b Block, opts *SetOpts) {
 				viewer.ViewBlockUpdate(pos, secondLayer, 1)
 			}
 		}
+	}
+
+	if opts.KeepScheduledTicks {
+		after := b
+		if after == nil {
+			after = w.conf.Blocks.Air()
+		}
+		w.scheduledUpdates.replaceState(w.conf.Blocks, pos, oldBlock, after)
 	}
 
 	if !opts.KeepRedstonePower && (redstoneAfterRelevant || (needOldBlock && isRedstoneRelevant(oldBlock))) {

@@ -5,6 +5,7 @@ import (
 	"github.com/df-mc/dragonfly/server/world"
 	"github.com/df-mc/dragonfly/server/world/chunk"
 	"testing"
+	"time"
 )
 
 type connectionFireProvider struct {
@@ -104,4 +105,42 @@ func TestWireConnectionsRefreshWhenAdjacentChunkLoads(t *testing.T) {
 			t.Fatalf("wire retained missing-neighbor shape: actual=%v expected=%v", actual, expected)
 		}
 	})
+}
+
+// TestFireConnectionChangesPreserveScheduledTick checks both adding and removing a wall attachment.
+func TestFireConnectionChangesPreserveScheduledTick(t *testing.T) {
+	br := world.DefaultBlockRegistry
+	br.Finalize()
+	p := &connectionFireProvider{central: &chunk.Column{Chunk: chunk.New(br, world.Overworld.Range())}}
+	w := world.Config{Synchronous: true, Provider: p, RandomTickSpeed: -1}.New()
+	defer w.Close()
+	pos := cube.Pos{8, 64, 8}
+	runWorld(w, func(tx *world.Tx) {
+		tx.SetBlock(pos.Side(cube.FaceEast), Planks{}, nil)
+		f := Fire{}.DeriveState(pos, tx).(Fire)
+		tx.SetBlock(pos, f, nil)
+		tx.ScheduleBlockUpdate(pos, f, time.Second/20)
+	})
+	w.Save()
+	if p.saved == nil || len(p.saved.ScheduledBlocks) == 0 {
+		t.Fatal("setup: fire has no pending tick")
+	}
+	due := p.saved.ScheduledBlocks[0].Tick
+	for _, neighbour := range []world.Block{Planks{}, nil} {
+		runWorld(w, func(tx *world.Tx) {
+			tx.SetBlock(pos.Side(cube.FaceNorth), neighbour, nil)
+			tx.Block(pos).(Fire).NeighbourUpdateTick(pos, pos.Side(cube.FaceNorth), tx)
+		})
+		w.Save()
+		live := false
+		runWorld(w, func(tx *world.Tx) {
+			for _, tick := range p.saved.ScheduledBlocks {
+				b, _ := br.BlockByRuntimeID(tick.Block)
+				live = live || (tick.Tick == due && b == tx.Block(pos))
+			}
+		})
+		if !live {
+			t.Fatalf("connection change with neighbour %T lost deadline %d", neighbour, due)
+		}
+	}
 }
