@@ -60,12 +60,17 @@ type World struct {
 	closeStarted chan struct{}
 	closing      chan struct{}
 	running      sync.WaitGroup
+	autoSaveDone chan struct{}
+	// saveMu serializes persistence operations before any owner-side snapshot.
+	// It is only acquired by callers outside the world transaction owner.
+	saveMu sync.Mutex
 
 	// chunks holds a cache of chunks currently loaded. These chunks are cleared
 	// from this map after some time of not being used.
 	chunks        map[ChunkPos]*Column
 	chunkRequests map[ChunkPos]*chunkRequest
 	chunkWorkers  *chunkWorkerPool
+	unloading     *pendingChunkSave
 
 	// entities holds a map of entities currently loaded and the last ChunkPos
 	// that the Entity was in. These are tracked so that a call to RemoveEntity
@@ -332,6 +337,10 @@ type SetOpts struct {
 	// around the changed block. This is used by the redstone engine while
 	// applying its own block-state updates to avoid duplicate same-tick work.
 	DisableRedstoneUpdates bool
+	// KeepRedstonePower makes SetBlock keep the power the redstone engine
+	// holds for the position, for a change that does not affect the power the
+	// block receives or emits, such as the shape of redstone wire.
+	KeepRedstonePower bool
 }
 
 // setBlock writes a block to the position passed. If a chunk is not yet loaded
@@ -426,7 +435,7 @@ func (tx *Tx) setBlock(pos cube.Pos, b Block, opts *SetOpts) {
 		}
 	}
 
-	if redstoneAfterRelevant || (needOldBlock && isRedstoneRelevant(oldBlock)) {
+	if !opts.KeepRedstonePower && (redstoneAfterRelevant || (needOldBlock && isRedstoneRelevant(oldBlock))) {
 		w.redstone.forget(pos)
 	}
 
@@ -1182,9 +1191,22 @@ func (w *World) PortalDestination(dim Dimension) *World {
 	return w
 }
 
-// Save saves the World to the provider.
+// Save saves the World to the provider. Call it outside a world transaction.
 func (w *World) Save() {
-	<-w.exec(w.save(w.saveChunk))
+	w.saveAll()
+	if w.closed.Load() {
+		<-w.closing
+	}
+}
+
+// saveAll serializes an explicit or automatic save against unload snapshots.
+// The autosave goroutine must return on close rather than waiting for itself.
+func (w *World) saveAll() {
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
+	if !w.closed.Load() {
+		<-w.exec(w.save(w.saveChunk))
+	}
 }
 
 // save saves all loaded chunks to the World's provider.
@@ -1217,6 +1239,11 @@ func (w *World) saveChunk(_ *Tx, pos ChunkPos, c *Column) {
 // in it are closed.
 func (w *World) closeChunk(tx *Tx, pos ChunkPos, c *Column) {
 	w.saveChunk(tx, pos, c)
+	w.unloadChunk(tx, pos, c)
+}
+
+// unloadChunk detaches a column after its persistence data has been captured.
+func (w *World) unloadChunk(tx *Tx, pos ChunkPos, c *Column) {
 	w.scheduledUpdates.removeChunk(pos)
 	w.redstone.removeChunk(pos)
 	// Note: We close c.Entities here because some entities may remove
@@ -1243,7 +1270,14 @@ func (w *World) close() {
 	close(w.closeStarted)
 	w.scheduleMu.Unlock()
 
+	if !w.conf.Synchronous {
+		// Finish the one detached save, including restoring a failed save,
+		// before the final owner transaction saves and closes the remaining chunks.
+		<-w.autoSaveDone
+	}
 	w.scheduling.Wait()
+	w.saveMu.Lock()
+	defer w.saveMu.Unlock()
 	w.scheduleMu.Lock()
 	w.closeAcceptingEntityTasks.Store(true)
 	w.scheduleMu.Unlock()
@@ -1372,6 +1406,9 @@ func (tx *Tx) chunk(pos ChunkPos) *Column {
 	if ok {
 		return c
 	}
+	if c, ok := w.chunkFromPendingSave(pos); ok {
+		return c
+	}
 	c, ok = w.chunkFromAsyncPool(tx, pos)
 	if ok {
 		return c
@@ -1410,22 +1447,25 @@ func (w *World) emptyColumn() *Column {
 
 // loadChunkAsync loads or generates the chunk at pos in the background,
 // calling callback once ready. It returns false if it could not be scheduled.
-func (w *World) loadChunkAsync(tx *Tx, pos ChunkPos, callback chunkCallback) bool {
+func (w *World) loadChunkAsync(tx *Tx, pos ChunkPos, callback chunkCallback, queued *atomic.Int32, batchSize int) bool {
 	if c, ok := w.chunks[pos]; ok {
-		callback(tx, c)
+		callback.receive(tx, c)
+		return true
+	}
+	if c, ok := w.chunkFromPendingSave(pos); ok {
+		callback.receive(tx, c)
 		return true
 	}
 	if w.conf.Synchronous {
 		// Synchronous worlds have no chunk workers; load on the calling goroutine.
-		callback(tx, tx.chunk(pos))
+		callback.receive(tx, tx.chunk(pos))
 		return true
 	}
-	if req, ok := w.chunkRequests[pos]; ok {
-		req.callbacks = append(req.callbacks, callback)
+	if req, ok := w.chunkRequests[pos]; ok && req.attach(callback) {
 		return true
 	}
-	req := &chunkRequest{pos: pos, done: make(chan struct{}), callbacks: []chunkCallback{callback}}
-	if !w.chunkWorkers.schedule(req) {
+	req := &chunkRequest{pos: pos, queued: queued, done: make(chan struct{}), callbacks: []chunkCallback{callback}}
+	if !w.chunkWorkers.schedule(req, batchSize) {
 		return false
 	}
 	w.chunkRequests[pos] = req
@@ -1449,7 +1489,7 @@ func (w *World) addChunk(pos ChunkPos, c *chunk.Column) *Column {
 }
 
 // chunkFromAsyncPool waits for a pending background load of the chunk at pos,
-// returning false if none was underway.
+// returning false if none was underway or it was cancelled before generation.
 func (w *World) chunkFromAsyncPool(tx *Tx, pos ChunkPos) (*Column, bool) {
 	req, ok := w.chunkRequests[pos]
 	if ok {
@@ -1498,6 +1538,8 @@ func (w *World) spreadLight(pos ChunkPos) {
 // autoSave runs until the world is running, saving and removing chunks that
 // are no longer in use.
 func (w *World) autoSave() {
+	defer w.running.Done()
+	defer close(w.autoSaveDone)
 	save := &time.Ticker{C: make(<-chan time.Time)}
 	if w.conf.SaveInterval > 0 {
 		save = time.NewTicker(w.conf.SaveInterval)
@@ -1509,21 +1551,11 @@ func (w *World) autoSave() {
 	for {
 		select {
 		case <-closeUnused.C:
-			<-w.exec(w.closeUnusedChunks)
+			w.closeUnusedChunks()
 		case <-save.C:
-			w.Save()
-		case <-w.closing:
-			w.running.Done()
+			w.saveAll()
+		case <-w.closeStarted:
 			return
-		}
-	}
-}
-
-// closeUnusedChunk closes all chunks currently not in use by any viewer.
-func (w *World) closeUnusedChunks(tx *Tx) {
-	for pos, c := range w.chunks {
-		if len(c.viewers) == 0 {
-			w.closeChunk(tx, pos, c)
 		}
 	}
 }

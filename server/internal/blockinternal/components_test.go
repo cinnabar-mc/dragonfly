@@ -5,12 +5,39 @@ import (
 	"testing"
 
 	"github.com/df-mc/dragonfly/server/block"
+	"github.com/df-mc/dragonfly/server/block/cube"
 	"github.com/df-mc/dragonfly/server/block/customblock"
 	"github.com/df-mc/dragonfly/server/item"
 	"github.com/df-mc/dragonfly/server/world"
 	"github.com/sandertv/gophertunnel/minecraft/nbt"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
+
+// TestComponents_CollisionCanBeExplicitlyDisabled separates an omitted box
+// (inherit the client default) from an intentionally non-collidable block.
+func TestComponents_CollisionCanBeExplicitlyDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		properties       customblock.Properties
+		present, enabled bool
+	}{
+		{"default", customblock.Properties{}, false, false},
+		{"disabled", customblock.Properties{DisableCollision: true}, true, false},
+		{"box", customblock.Properties{CollisionBox: cube.Box(0, 0, 0, 1, 1, 1)}, true, true},
+		{"disabled overrides box", customblock.Properties{DisableCollision: true, CollisionBox: cube.Box(0, 0, 0, 1, 1, 1)}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			components := componentsFromProperties("test:collision", tc.properties)
+			component, present := components["minecraft:collision_box"].(map[string]any)
+			if present != tc.present {
+				t.Fatalf("collision present=%v, want %v", present, tc.present)
+			}
+			if present && component["enabled"] != tc.enabled {
+				t.Fatalf("collision enabled=%v, want %v", component["enabled"], tc.enabled)
+			}
+		})
+	}
+}
 
 // taggedBlock is a custom block carrying vanilla block tags.
 type taggedBlock struct {

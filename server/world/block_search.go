@@ -33,6 +33,8 @@ func (w *World) blocksWithin(pos cube.Pos, radius int, blocks ...Block) iter.Seq
 				var c *chunk.Chunk
 				if col, ok := w.chunks[chunkPos]; ok {
 					c = col.Chunk
+				} else if col, ok := w.pendingColumn(chunkPos); ok {
+					c = col.Chunk
 				} else {
 					col, err := w.conf.Provider.LoadColumn(chunkPos, w.conf.Dim)
 					if err != nil {

@@ -46,11 +46,12 @@ func TestSharedPaletteCoversEveryState(t *testing.T) {
 			t.Errorf("%s has no shared properties", name)
 			continue
 		}
-		if _, available := sharedblock.Shape(properties.CollisionShape); !available {
-			t.Errorf("%s hash %d has no collision shape", name, hash)
+		// Zero explicitly marks an unavailable shape rather than an invalid index.
+		if _, available := sharedblock.Shape(properties.CollisionShape); properties.CollisionShape != 0 && !available {
+			t.Errorf("%s hash %d has an invalid collision shape index", name, hash)
 		}
-		if _, available := sharedblock.Shape(properties.OutlineShape); !available {
-			t.Errorf("%s hash %d has no outline shape", name, hash)
+		if _, available := sharedblock.Shape(properties.OutlineShape); properties.OutlineShape != 0 && !available {
+			t.Errorf("%s hash %d has an invalid outline shape index", name, hash)
 		}
 		if _, ok := unknownBlockProps[name]; !ok {
 			t.Errorf("%s has no shared fallback properties", name)

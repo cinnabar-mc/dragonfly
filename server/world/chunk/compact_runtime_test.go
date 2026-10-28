@@ -153,6 +153,7 @@ func (testBlockRegistry) RuntimeIDToState(runtimeID uint32) (string, map[string]
 	return "test:block", nil, true
 }
 func (testBlockRegistry) StateToRuntimeID(string, map[string]any) (uint32, bool) { return 0, true }
+func (testBlockRegistry) DefaultProperties(string) (map[string]any, bool)        { return nil, false }
 func (testBlockRegistry) FilteringBlock(uint32) uint8                            { return 0 }
 func (testBlockRegistry) LightBlock(uint32) uint8                                { return 0 }
 func (testBlockRegistry) RandomTickBlock(uint32) bool                            { return false }

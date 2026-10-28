@@ -86,6 +86,10 @@ func (networkHashTestRegistry) RuntimeIDToState(uint32) (string, map[string]any,
 func (networkHashTestRegistry) StateToRuntimeID(string, map[string]any) (uint32, bool) {
 	return 0, true
 }
+
+func (networkHashTestRegistry) DefaultProperties(string) (map[string]any, bool) {
+	return nil, false
+}
 func (networkHashTestRegistry) FilteringBlock(uint32) uint8       { return 0 }
 func (networkHashTestRegistry) LightBlock(uint32) uint8           { return 0 }
 func (networkHashTestRegistry) RandomTickBlock(uint32) bool       { return false }
