@@ -87,7 +87,9 @@ func Components(identifier string, b world.CustomBlock, blockID int32) map[strin
 // a custom permutation.
 func componentsFromProperties(identifier string, props customblock.Properties) map[string]any {
 	components := make(map[string]any)
-	if props.CollisionBox != (cube.BBox{}) {
+	if props.DisableCollision {
+		components["minecraft:collision_box"] = map[string]any{"enabled": false}
+	} else if props.CollisionBox != (cube.BBox{}) {
 		components["minecraft:collision_box"] = collisionBoxComponent(props.CollisionBox)
 	}
 	switch {

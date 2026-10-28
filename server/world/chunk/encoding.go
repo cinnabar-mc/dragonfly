@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/df-mc/worldupgrader/blockupgrader"
@@ -54,7 +55,9 @@ func (biomePaletteEncoding) decode(buf *bytes.Buffer) (uint32, error) {
 // between runtime IDs and block states.
 type BlockPaletteEncoding struct {
 	Blocks BlockRegistry
-	// legacy, if non-nil, is set when an entry older than CurrentBlockVersion is decoded.
+	// legacy, if non-nil, is set when an entry is decoded that is older than
+	// CurrentBlockVersion or that lacked properties which were filled in while
+	// decoding it.
 	legacy *bool
 }
 
@@ -66,7 +69,7 @@ func (bpe BlockPaletteEncoding) decode(buf *bytes.Buffer) (uint32, error) {
 	if err := nbt.NewDecoderWithEncoding(buf, nbt.LittleEndian).Decode(&m); err != nil {
 		return 0, fmt.Errorf("error decoding block palette entry: %w", err)
 	}
-	return bpe.DecodeBlockState(m)
+	return bpe.decodeBlockState(m)
 }
 
 func (bpe BlockPaletteEncoding) EncodeBlockState(v uint32) blockEntry {
@@ -76,7 +79,18 @@ func (bpe BlockPaletteEncoding) EncodeBlockState(v uint32) blockEntry {
 	return blockEntry{Name: name, State: props, Version: CurrentBlockVersion}
 }
 
+// DecodeBlockState resolves a borrowed NBT block state without modifying it.
 func (bpe BlockPaletteEncoding) DecodeBlockState(m map[string]any) (uint32, error) {
+	m = maps.Clone(m)
+	if state, ok := m["states"].(map[string]any); ok {
+		m["states"] = maps.Clone(state)
+	}
+	return bpe.decodeBlockState(m)
+}
+
+// decodeBlockState takes ownership of m and its property map for upgrading.
+// Replacing those properties with a global legacy mapping requires a new copy.
+func (bpe BlockPaletteEncoding) decodeBlockState(m map[string]any) (uint32, error) {
 	// Decode the name and version of the block entry.
 	name, _ := m["name"].(string)
 	version, _ := m["version"].(int32)
@@ -99,7 +113,7 @@ func (bpe BlockPaletteEncoding) DecodeBlockState(m map[string]any) (uint32, erro
 
 		// Update the name, state, and version.
 		name = state.Name
-		stateI = state.State
+		stateI = maps.Clone(state.State)
 		version = state.Version
 	} else if !ok {
 		// The state is a post-1.13 block state, but the states field is missing, likely due to a broken world
@@ -111,24 +125,50 @@ func (bpe BlockPaletteEncoding) DecodeBlockState(m map[string]any) (uint32, erro
 		return 0, fmt.Errorf("invalid state in block entry")
 	}
 
-	// Upgrade the block state if necessary.
+	// The upgrader may mutate this call's owned properties, so their count is
+	// taken first to find out if it added any.
+	stored := len(state)
 	upgraded := blockupgrader.Upgrade(blockupgrader.BlockState{
 		Name:       name,
 		Properties: state,
 		Version:    version,
 	})
+	properties, filled := bpe.fillDefaults(upgraded.Name, upgraded.Properties)
 
-	if bpe.legacy != nil && version < CurrentBlockVersion {
-		// Any state added since this entry was written was defaulted by the upgrade above, which is wrong
-		// for states derived from surrounding blocks.
+	if bpe.legacy != nil && (version < CurrentBlockVersion || len(upgraded.Properties) > stored || filled) {
+		// Any property added since this entry was written was defaulted above,
+		// which is wrong for states derived from surrounding blocks. The game
+		// added such properties without bumping the block state version, so the
+		// version alone does not tell.
 		*bpe.legacy = true
 	}
 
-	v, ok := bpe.Blocks.StateToRuntimeID(upgraded.Name, upgraded.Properties)
+	v, ok := bpe.Blocks.StateToRuntimeID(upgraded.Name, properties)
 	if !ok {
-		return 0, fmt.Errorf("cannot get runtime ID of block state %v{%+v} %v", upgraded.Name, upgraded.Properties, upgraded.Version)
+		return 0, fmt.Errorf("cannot get runtime ID of block state %v{%+v} %v", upgraded.Name, properties, upgraded.Version)
 	}
 	return v, nil
+}
+
+// fillDefaults returns the properties passed with every property of the block's
+// default state that they lack added, and true if any was. The game fills in
+// properties the same way when it loads a state that was saved before they
+// existed. The properties passed are left unchanged.
+func (bpe BlockPaletteEncoding) fillDefaults(name string, properties map[string]any) (map[string]any, bool) {
+	defaults, ok := bpe.Blocks.DefaultProperties(name)
+	if !ok || len(properties) >= len(defaults) {
+		return properties, false
+	}
+	filled := maps.Clone(properties)
+	if filled == nil {
+		filled = make(map[string]any, len(defaults))
+	}
+	for k, v := range defaults {
+		if _, ok := filled[k]; !ok {
+			filled[k] = v
+		}
+	}
+	return filled, true
 }
 
 // diskEncoding implements the Chunk encoding for writing to disk.

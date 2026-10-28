@@ -32,6 +32,15 @@ type Provider interface {
 	StoreColumn(pos ChunkPos, dim Dimension, col *chunk.Column) error
 }
 
+// ConcurrentColumnReader is an optional provider capability. Returning true
+// permits LoadColumn to overlap other provider calls. Reads must be thread-safe
+// and return one consistent column even while its keys are being updated.
+// The capability must not change while the provider is in use by a World.
+type ConcurrentColumnReader interface {
+	Provider
+	ConcurrentColumnReads() bool
+}
+
 // Compile time check to make sure NopProvider implements Provider.
 var _ Provider = (*NopProvider)(nil)
 
@@ -60,8 +69,7 @@ func (NopProvider) LoadPlayerSpawnPosition(uuid.UUID) (cube.Pos, bool, error) {
 func (NopProvider) SavePlayerSpawnPosition(uuid.UUID, cube.Pos) error { return nil }
 func (NopProvider) Close() error                                      { return nil }
 
-// lockedProvider wraps a Provider, serialising all calls for providers that
-// are not safe for concurrent use.
+// lockedProvider serialises provider calls except explicitly safe column reads.
 type lockedProvider struct {
 	mu sync.Mutex
 	p  Provider
@@ -92,6 +100,9 @@ func (l *lockedProvider) SavePlayerSpawnPosition(id uuid.UUID, pos cube.Pos) err
 }
 
 func (l *lockedProvider) LoadColumn(pos ChunkPos, dim Dimension) (*chunk.Column, error) {
+	if p, ok := l.p.(ConcurrentColumnReader); ok && p.ConcurrentColumnReads() {
+		return p.LoadColumn(pos, dim)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.p.LoadColumn(pos, dim)

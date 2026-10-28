@@ -376,6 +376,23 @@ func (queue *scheduledTickQueue) schedule(br BlockRegistry, pos cube.Pos, b Bloc
 	queue.ticks = append(queue.ticks, scheduledTick{pos: pos, t: resTick, b: b, bhash: index.hash})
 }
 
+// replaceState retains deadlines when a derived block state changes its full hash.
+func (queue *scheduledTickQueue) replaceState(br BlockRegistry, pos cube.Pos, before, after Block) {
+	oldIndex := scheduledTickIndex{pos: pos, hash: br.BlockHash(before)}
+	deadline, ok := queue.furthestTicks[oldIndex]
+	if !ok {
+		return
+	}
+	newIndex := scheduledTickIndex{pos: pos, hash: br.BlockHash(after)}
+	for i := range queue.ticks {
+		if tick := &queue.ticks[i]; tick.pos == pos && tick.bhash == oldIndex.hash {
+			tick.b, tick.bhash = after, newIndex.hash
+		}
+	}
+	delete(queue.furthestTicks, oldIndex)
+	queue.furthestTicks[newIndex] = max(queue.furthestTicks[newIndex], deadline)
+}
+
 // fromChunk returns all scheduled ticks positioned within a ChunkPos.
 func (queue *scheduledTickQueue) fromChunk(pos ChunkPos) []scheduledTick {
 	m := make([]scheduledTick, 0, 8)

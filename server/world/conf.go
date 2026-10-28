@@ -138,9 +138,9 @@ func (conf Config) New() *World {
 	}
 	s := conf.Provider.Settings()
 
-	// Serialise Provider calls (made by both the owner and the chunk load workers)
-	// and, with a single worker, Generator calls, for implementations that aren't
-	// concurrency-safe.
+	// Serialise Provider calls, allowing only opted-in column reads to overlap.
+	// With a single worker, also serialise Generator calls for implementations
+	// that aren't concurrency-safe.
 	conf.Provider = &lockedProvider{p: conf.Provider}
 	if conf.ChunkLoadWorkers == 1 {
 		conf.Generator = &lockedGenerator{g: conf.Generator}
@@ -155,6 +155,7 @@ func (conf Config) New() *World {
 		queueClosing:     make(chan struct{}),
 		closeStarted:     make(chan struct{}),
 		closing:          make(chan struct{}),
+		autoSaveDone:     make(chan struct{}),
 		queue:            make(chan transaction, 128),
 		r:                rand.New(conf.RandSource),
 		advance:          s.ref.Add(1) == 1,

@@ -157,6 +157,54 @@ func PredictProjectileLanding(src world.BlockSource, available func(cube.Pos) bo
 	return ProjectilePrediction{Position: projectileVec64(pos)}, advanced
 }
 
+// ResumeProjectileFlight locates a projectile partway through the flight
+// launched from start with velocity. It returns the velocity to pass to
+// PredictProjectileLanding together with the observed position, so the
+// prediction covers only the remaining flight instead of retracing cells the
+// projectile has already passed, and the number of ticks already flown, so a
+// caller can keep the whole flight within one tick budget. The flight tick
+// nearest observed among the first maxTicks is chosen; collisions are ignored,
+// so observed must belong to the same uninterrupted flight. A flight that
+// revisits a point, such as a vertical throw, resolves to the earliest nearest
+// tick. It returns false when the inputs are invalid or the simulation leaves
+// the finite float32 range.
+func ResumeProjectileFlight(start, velocity, observed mgl64.Vec3, physics ProjectilePhysics, maxTicks int) (mgl64.Vec3, int, bool) {
+	gravity, drag := physics.Gravity, physics.Drag
+	if maxTicks <= 0 || !projectileFinite32(gravity) || !projectileFinite32(drag) || gravity < 0 || drag < 0 || drag >= 1 {
+		return mgl64.Vec3{}, 0, false
+	}
+	for _, v := range []mgl64.Vec3{start, velocity, observed} {
+		for _, component := range v {
+			if !projectileFinite32(component) {
+				return mgl64.Vec3{}, 0, false
+			}
+		}
+	}
+	pos := mgl32.Vec3{float32(start[0]), float32(start[1]), float32(start[2])}
+	declared := mgl32.Vec3{float32(velocity[0]), float32(velocity[1]), float32(velocity[2])}
+	inertia, gravity32 := float32(1-drag), float32(gravity)
+	best, bestTick, bestDistance := declared, 0, projectileVec64(pos).Sub(observed).LenSqr()
+	for tick := 1; tick <= maxTicks; tick++ {
+		// Mirror PredictProjectileLanding's force phase so the returned velocity
+		// continues the flight exactly from the matched tick.
+		motion := declared
+		if physics.ForcesBeforeMove {
+			motion = projectileNextVelocity(declared, inertia, gravity32)
+		}
+		pos = pos.Add(motion)
+		declared = projectileNextVelocity(declared, inertia, gravity32)
+		for axis := range pos {
+			if !projectileFinite32(float64(pos[axis])) || !projectileFinite32(float64(declared[axis])) {
+				return mgl64.Vec3{}, 0, false
+			}
+		}
+		if distance := projectileVec64(pos).Sub(observed).LenSqr(); distance < bestDistance {
+			best, bestTick, bestDistance = declared, tick, distance
+		}
+	}
+	return projectileVec64(best), bestTick, true
+}
+
 func projectileNextVelocity(motion mgl32.Vec3, inertia, gravity float32) mgl32.Vec3 {
 	for axis := range motion {
 		motion[axis] = float32(motion[axis] * inertia)

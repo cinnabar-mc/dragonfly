@@ -31,7 +31,7 @@ func TestMovedActorSurvivesSourceColumnSave(t *testing.T) {
 	if err := db.StoreColumn(source, world.Overworld, empty()); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.entities(dbKey{pos: destination, dim: world.Overworld})
+	got, err := db.entities(dbKey{pos: destination, dim: world.Overworld}, db.ldb)
 	if err != nil {
 		t.Fatalf("destination actor was deleted by source save: %v", err)
 	}

@@ -2,6 +2,7 @@ package item
 
 import (
 	"github.com/df-mc/dragonfly/server/block/cube"
+	"github.com/df-mc/dragonfly/server/block/cube/trace"
 	"github.com/df-mc/dragonfly/server/world"
 	"github.com/df-mc/dragonfly/server/world/sound"
 	"github.com/go-gl/mathgl/mgl64"
@@ -129,7 +130,7 @@ func (b Bucket) fillFrom(pos cube.Pos, tx *world.Tx, ctx *UseContext) bool {
 	if !ok {
 		return false
 	}
-	if liquid.LiquidDepth() != 8 || liquid.LiquidFalling() {
+	if !b.CanFill(liquid) {
 		// Only allow picking up liquid source blocks.
 		return false
 	}
@@ -166,4 +167,88 @@ func canDisplace(b world.Block, liq world.Liquid) bool {
 		return d.CanDisplace(liq)
 	}
 	return false
+}
+
+// CanFill reports whether this empty bucket can collect the supplied liquid.
+// Flowing and falling liquids cannot be collected.
+func (b Bucket) CanFill(liquid world.Liquid) bool {
+	return b.Empty() && liquid != nil && liquid.LiquidDepth() == 8 && !liquid.LiquidFalling()
+}
+
+// BucketPickupSource supplies terrain, both liquid layers, and loaded coverage.
+type BucketPickupSource interface {
+	world.BlockSource
+	Liquid(cube.Pos) (world.Liquid, bool)
+	BlockAvailable(cube.Pos) bool
+}
+
+// PickupTarget finds a visible source-liquid face on pos within reach of eye.
+// It tries the centre and each face so a shallow pool's rim cannot hide a
+// reachable top face. Unavailable terrain, intervening sources and block models
+// before the hit are rejected. This conservative query does not check permission.
+func (b Bucket) PickupTarget(pos cube.Pos, src BucketPickupSource, bounds cube.Range, eye mgl64.Vec3, reach float64) (trace.BBoxResult, bool) {
+	centre := pos.Vec3Centre()
+	best := reach * reach
+	var chosen trace.BBoxResult
+	found := false
+	points := []mgl64.Vec3{centre}
+	for _, face := range cube.Faces() {
+		points = append(points, centre.Add(cube.Pos{}.Side(face).Vec3().Mul(.5)))
+	}
+	for _, aim := range points {
+		hit, ok := b.pickupTargetRay(pos, src, bounds, eye, reach, aim)
+		if distance := hit.Position().Sub(eye).LenSqr(); ok && (!found || distance < best) {
+			chosen, best, found = hit, distance, true
+		}
+	}
+	return chosen, found
+}
+
+// pickupTargetRay validates one candidate face ray against the source and terrain.
+func (b Bucket) pickupTargetRay(pos cube.Pos, src BucketPickupSource, bounds cube.Range, eye mgl64.Vec3, reach float64, end mgl64.Vec3) (trace.BBoxResult, bool) {
+	var none trace.BBoxResult
+	if !(reach > 0) || !trace.ValidBlockSegment(bounds, eye, end) || !src.BlockAvailable(pos) {
+		return none, false
+	}
+	liquid, ok := src.Liquid(pos)
+	if !ok || !b.CanFill(liquid) {
+		return none, false
+	}
+	box := cube.Box(0, 0, 0, 1, 1, 1).Translate(pos.Vec3())
+	if box.Vec3Within(eye) {
+		// A submerged eye needs an exit-face ray; a segment ending at the centre
+		// never crosses a face. A centred eye uses the top face.
+		direction := end.Sub(eye)
+		if direction.LenSqr() < 1e-12 {
+			direction = mgl64.Vec3{0, 1, 0}
+		}
+		end = eye.Add(direction.Normalize().Mul(2))
+		if !trace.ValidBlockSegment(bounds, eye, end) {
+			return none, false
+		}
+	}
+	hit, ok := trace.BBoxIntercept(box, eye, end)
+	if !ok || !(hit.Position().Sub(eye).LenSqr() <= reach*reach) {
+		return none, false
+	}
+	clear := true
+	trace.TraverseBlocks(eye, end, func(cell cube.Pos) bool {
+		if cell.OutOfBounds(bounds) || !src.BlockAvailable(cell) {
+			clear = false
+			return false
+		}
+		if solid, blocked := trace.BlockIntercept(cell, src, src.Block(cell), eye, end); blocked && solid.Position().Sub(eye).LenSqr() <= hit.Position().Sub(eye).LenSqr() {
+			clear = false
+			return false
+		}
+		if cell == pos {
+			return false
+		}
+		if other, wet := src.Liquid(cell); wet && b.CanFill(other) {
+			clear = false
+			return false
+		}
+		return true
+	})
+	return hit, clear
 }
