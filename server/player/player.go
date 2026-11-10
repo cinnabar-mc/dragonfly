@@ -2374,6 +2374,15 @@ func (p *Player) teleport(pos mgl64.Vec3) {
 	p.ResetFallDistance()
 }
 
+// movedRotation applies a movement's rotation delta to rot. Yaw wraps around like
+// cube.Rotation.Add, but pitch is clamped to [-90, 90] instead of wrapping, so a
+// player looking straight up or down keeps that pitch.
+func movedRotation(rot cube.Rotation, deltaYaw, deltaPitch float64) cube.Rotation {
+	res := cube.Rotation{rot.Yaw(), 0}.Add(cube.Rotation{deltaYaw, 0})
+	res[1] = mgl64.Clamp(rot.Pitch()+deltaPitch, -90, 90)
+	return res
+}
+
 // Move moves the player from one position to another in the world, by adding the delta passed to the current
 // position of the player.
 // Move also rotates the player, adding deltaYaw and deltaPitch to the respective values.
@@ -2396,7 +2405,7 @@ func (p *Player) Move(deltaPos mgl64.Vec3, deltaYaw, deltaPitch float64) {
 	}
 	var (
 		pos         = p.Position()
-		res, resRot = pos.Add(deltaPos), p.Rotation().Add(cube.Rotation{deltaYaw, deltaPitch})
+		res, resRot = pos.Add(deltaPos), movedRotation(p.Rotation(), deltaYaw, deltaPitch)
 	)
 	ctx := NewEventContext(p.tx, p)
 	if p.Handler().HandleMove(ctx, res, resRot); ctx.Cancelled() {
